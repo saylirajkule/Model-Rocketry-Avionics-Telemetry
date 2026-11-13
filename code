@@ -1,0 +1,145 @@
+#include <Wire.h>
+#include <Adafruit_BMP280.h>
+
+Adafruit_BMP280 bmp; // I2C
+
+// Pin definitions
+const int IGNITER_PIN = 4;      // GPIO pin connected to MOSFET/Relay for black powder e-match
+const int LED_PIN = 2;          // Onboard status LED
+
+// Flight States
+enum FlightState {
+  IDLE,         // Waiting on the pad
+  ASCENT,       // Rocket is flying upward
+  DESCENT,      // Apogee reached, falling back down with parachute open
+  LANDED        // Touchdown detected
+};
+
+FlightState currentState = IDLE;
+
+// Flight telemetry variables
+float groundAltitude = 0.0;
+float maxAltitude = 0.0;
+float currentAltitude = 0.0;
+float previousAltitude = 0.0;
+unsigned long lastTime = 0;
+float velocity = 0.0;           // Vertical velocity in meters/second
+
+// Tuning thresholds
+const float LAUNCH_THRESHOLD_METERS = 3.0; // Altitude change to confirm launch
+const float APOGEE_DROP_THRESHOLD = 1.0;   // Drop in meters from peak to trigger deployment
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(LED_PIN, OUTPUT);
+  
+  // Initialize Igniter pin safely to LOW
+  pinMode(IGNITER_PIN, OUTPUT);
+  digitalWrite(IGNITER_PIN, LOW);
+
+  // Initialize BMP280 barometer
+  if (!bmp.begin(0x76)) { // Use 0x77 if your sensor has a different address
+    Serial.println(F("Error: BMP280 sensor not found. Check your wiring!"));
+    while (1) {
+      digitalWrite(LED_PIN, HIGH);
+      delay(150);
+      digitalWrite(LED_PIN, LOW);
+      delay(150);
+    }
+  }
+
+  // Configure BMP280 for fast high-frequency sampling (ideal for rocketry)
+  bmp.setSampling(Adafruit_BMP280::MODE_NORMAL,     
+                  Adafruit_BMP280::SAMPLING_X2,     // Temperature oversampling
+                  Adafruit_BMP280::SAMPLING_X16,    // Pressure oversampling
+                  Adafruit_BMP280::FILTER_X16,      // IIR Filter to block sudden wind spikes
+                  Adafruit_BMP280::STANDBY_MS_0_5); 
+
+  Serial.println(F("Calibrating ground baseline... Keep the rocket completely still."));
+  
+  // Average 50 readings to get a stable ground reference altitude
+  float sum = 0;
+  for (int i = 0; i < 50; i++) {
+    sum += bmp.readAltitude(1013.25); 
+    delay(20);
+  }
+  groundAltitude = sum / 50.0;
+  maxAltitude = groundAltitude;
+  
+  Serial.print(F("Ground Altitude Locked: "));
+  Serial.print(groundAltitude);
+  Serial.println(F(" m"));
+  
+  // Solid LED means system is armed and ready on the pad
+  digitalWrite(LED_PIN, HIGH); 
+  lastTime = millis();
+}
+
+void loop() {
+  unsigned long currentTime = millis();
+  float deltaTime = (currentTime - lastTime) / 1000.0; // Time step in seconds
+
+  // Run calculation loop at roughly 20 Hz (every 50ms)
+  if (deltaTime >= 0.05) {
+    currentAltitude = bmp.readAltitude(1013.25) - groundAltitude;
+    
+    // Calculate vertical velocity: v = Δs / Δt
+    velocity = (currentAltitude - previousAltitude) / deltaTime;
+    
+    previousAltitude = currentAltitude;
+    lastTime = currentTime;
+
+    // Flight State Machine
+    switch (currentState) {
+      case IDLE:
+        // Detect liftoff when altitude exceeds the launch threshold
+        if (currentAltitude > LAUNCH_THRESHOLD_METERS) {
+          currentState = ASCENT;
+          Serial.println(F("--- LIFTOFF DETECTED ---"));
+        }
+        break;
+
+      case ASCENT:
+        // Track the highest point of flight
+        if (currentAltitude > maxAltitude) {
+          maxAltitude = currentAltitude;
+        }
+        
+        // Detect apogee: if altitude drops below the peak by our threshold limit
+        if (currentAltitude < (maxAltitude - APOGEE_DROP_THRESHOLD)) {
+          currentState = DESCENT;
+          Serial.println(F("--- APOGEE REACHED: Firing Black Powder Ejection! ---"));
+          deployParachute();
+        }
+        break;
+
+      case DESCENT:
+        // Check if the rocket has landed (altitude near 0 and velocity close to 0)
+        if (abs(currentAltitude) < 1.5 && abs(velocity) < 0.3) {
+          currentState = LANDED;
+          Serial.println(F("--- TOUCHDOWN: Mission Successful ---"));
+        }
+        break;
+
+      case LANDED:
+        // Blink LED slowly to indicate safe recovery mode
+        digitalWrite(LED_PIN, (millis() / 400) % 2); 
+        break;
+    }
+
+    // Real-time telemetry feed for Serial Monitor / Serial Plotter
+    Serial.print("Alt:");
+    Serial.print(currentAltitude);
+    Serial.print(", Vel:");
+    Serial.print(velocity);
+    Serial.print(", State:");
+    Serial.println(currentState);
+  }
+}
+
+void deployParachute() {
+  // Send a pulse to fire the black powder e-match via a low-side MOSFET or relay
+  digitalWrite(IGNITER_PIN, HIGH);
+  delay(800); // 800ms pulse ensures reliable e-match ignition
+  digitalWrite(IGNITER_PIN, LOW);
+}
