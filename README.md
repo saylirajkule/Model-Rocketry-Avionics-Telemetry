@@ -21,4 +21,4 @@ Onboard avionics firmware, sensor telemetry, and technical documentation develop
 * `media/` — Hardware integration photos, circuit layouts, and launch documentation.
 
 ## Project Report
-Read the full engineering breakdown, test results, and system schematics in **[Project_Report.pdf](PK)** 
+Read the full engineering breakdown, test results, and system schematics in repo itself.
